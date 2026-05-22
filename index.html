@@ -524,7 +524,7 @@
       <button class="chat-toggle-btn" id="chatToggleIcon">▼ recolher</button>
     </div>
     <div class="chat-messages" id="chatMessages">
-      <div class="chat-msg system" data-placeholder>
+      <div class="chat-msg system">
         <div class="msg-bubble">Chat habilitado — mande um salve! 👋</div>
       </div>
     </div>
@@ -557,7 +557,7 @@
 
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-import { getDatabase, ref, set, get, onValue, update, remove, off, push, onChildAdded, query, orderByChild, limitToLast }
+import { getDatabase, ref, set, get, onValue, update, remove, off, push, query, orderByChild, limitToLast }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
 
 const firebaseConfig = {
@@ -578,7 +578,7 @@ let state = {
   board: null, currentTurn: 1, selectedPiece: null, validMoves: [],
   gameOver: false, mode: 'local', myPlayer: 1, roomId: null,
   playerName: '', listeners: [], chatOpen: true, unreadCount: 0,
-  chatInitialized: false, placeholderRemoved: false, seenChatKeys: new Set()
+  chatInitialized: false
 };
 
 function makeRoomId() {
@@ -701,19 +701,8 @@ window.joinRoom = async function() {
   document.getElementById('lobbyCode').textContent = code;
   document.getElementById('slot1Name').textContent = data.p1;
   document.getElementById('slot2Name').textContent = name;
-
-  // Vai direto pro game — p2 entra e o jogo começa imediatamente
-  document.getElementById('p1Name').textContent = data.p1;
-  document.getElementById('p2Name').textContent = name;
-  state.board = JSON.parse(data.board);
-  state.currentTurn = data.currentTurn || 1;
-  state.gameOver = false;
-  document.getElementById('chatInputRow').style.display = '';
-  showScreen('gameScreen');
-  renderBoard();
-  updateGameUI();
+  showScreen('lobbyScreen');
   listenRoom(code);
-  listenChat(code);  // <— garante que p2 escuta o chat
 };
 
 window.startLocal = function() {
@@ -740,29 +729,8 @@ window.startLocal = function() {
 function listenRoom(id) {
   const r = roomRef(id);
   const unsub = onValue(r, snap => {
-    // Sala deletada = adversário saiu
-    if (!snap.exists()) {
-      // Só avisa se já estava jogando (não na tela inicial)
-      if (!document.getElementById('homeScreen').classList.contains('active')) {
-        toast('❌ O adversário saiu da partida.', 3500);
-        addSystemMsg('❌ O adversário saiu da partida.');
-        // Pequeno delay para o jogador ler o aviso antes de ir ao menu
-        setTimeout(() => leaveRoom(), 2500);
-      }
-      return;
-    }
+    if (!snap.exists()) { leaveRoom(); return; }
     const d = snap.val();
-
-    // Adversário sinalizou saída
-    if (d.playerLeft && d.playerLeft !== state.playerName) {
-      if (!document.getElementById('homeScreen').classList.contains('active')) {
-        toast(`❌ ${d.playerLeft} saiu da partida.`, 3500);
-        addSystemMsg(`❌ ${d.playerLeft} saiu da partida.`);
-        setTimeout(() => leaveRoom(), 2500);
-      }
-      return;
-    }
-
     // Lobby phase
     if (document.getElementById('lobbyScreen').classList.contains('active')) {
       document.getElementById('slot1Name').textContent = d.p1 || '...';
@@ -774,13 +742,13 @@ function listenRoom(id) {
         state.board = JSON.parse(d.board);
         state.currentTurn = d.currentTurn;
         state.gameOver = false;
+        // Re-enable chat input row
         document.getElementById('chatInputRow').style.display = '';
+        addSystemMsg(`${d.p1} e ${d.p2} entraram. Boa partida! 🎮`);
         showScreen('gameScreen');
         renderBoard();
         updateGameUI();
         listenChat(id);
-        // System msg via chat (aparece para ambos via Firebase)
-        push(chatRef(id), { sender:'', text:`${d.p1} e ${d.p2} entraram. Boa partida! 🎮`, ts: Date.now(), system: true });
       }
     } else {
       // Game phase
@@ -817,68 +785,57 @@ function listenRoom(id) {
 function listenChat(id) {
   if (state.chatInitialized) return;
   state.chatInitialized = true;
-  state.seenChatKeys = new Set();
-
   const cRef = chatRef(id);
-
-  // onChildAdded: dispara para cada mensagem existente ao conectar,
-  // depois uma vez por nova mensagem — nunca perde nenhuma.
-  // seenChatKeys garante que nunca renderiza a mesma mensagem duas vezes.
-  function handleChild(snap) {
-    const key = snap.key;
-    if (state.seenChatKeys.has(key)) return;
-    state.seenChatKeys.add(key);
-    appendChatMessage(snap.val());
-  }
-
-  onChildAdded(cRef, handleChild);
-  // Guarda a referência correta para remover o listener depois
-  state.listeners.push(() => off(cRef, 'child_added', handleChild));
+  // Listen for new messages
+  onValue(cRef, snap => {
+    if (!snap.exists()) return;
+    const msgs = [];
+    snap.forEach(c => msgs.push({key: c.key, ...c.val()}));
+    renderChatMessages(msgs);
+  });
+  state.listeners.push(() => off(cRef));
 }
 
-function appendChatMessage(m) {
+function renderChatMessages(msgs) {
   const container = document.getElementById('chatMessages');
-  if (!container) return;
+  // Keep system messages at top
+  const sysMsg = container.querySelector('.chat-msg.system');
+  container.innerHTML = '';
+  if (sysMsg) container.appendChild(sysMsg);
 
-  const isMe = !m.system && (m.sender === state.playerName);
+  // Remove first system msg if we have real msgs
+  if (msgs.length > 0 && sysMsg) sysMsg.remove();
 
-  // Remove placeholder "salve" apenas uma vez, só quando chega msg de verdade
-  if (!m.system && !state.placeholderRemoved) {
-    state.placeholderRemoved = true;
-    const placeholder = container.querySelector('[data-placeholder]');
-    if (placeholder) placeholder.remove();
-  }
+  let newUnread = 0;
+  msgs.forEach(m => {
+    const isMe = m.sender === state.playerName;
+    const div = document.createElement('div');
+    div.className = `chat-msg ${m.system ? 'system' : (isMe ? 'mine' : 'theirs')}`;
+    if (!m.system) {
+      const senderEl = document.createElement('div');
+      senderEl.className = 'msg-sender';
+      senderEl.textContent = m.sender;
+      div.appendChild(senderEl);
+    }
+    const bubble = document.createElement('div');
+    bubble.className = 'msg-bubble';
+    bubble.textContent = m.text;
+    div.appendChild(bubble);
+    container.appendChild(div);
+    if (!isMe && !m.system && state.chatOpen === false) newUnread++;
+  });
 
-  const div = document.createElement('div');
-  div.className = `chat-msg ${m.system ? 'system' : (isMe ? 'mine' : 'theirs')}`;
-
-  if (!m.system) {
-    const senderEl = document.createElement('div');
-    senderEl.className = 'msg-sender';
-    senderEl.textContent = m.sender;
-    div.appendChild(senderEl);
-  }
-
-  const bubble = document.createElement('div');
-  bubble.className = 'msg-bubble';
-  bubble.textContent = m.text;
-  div.appendChild(bubble);
-  container.appendChild(div);
-
-  // Badge + toast para mensagem do adversário com chat recolhido
-  if (!isMe && !m.system && !state.chatOpen) {
-    state.unreadCount++;
+  if (newUnread > 0) {
+    state.unreadCount += newUnread;
     const badge = document.getElementById('chatUnread');
     badge.textContent = state.unreadCount;
     badge.classList.add('show');
-    const preview = m.text.length > 30 ? m.text.slice(0,30)+'…' : m.text;
-    toast(`💬 ${m.sender}: ${preview}`, 2200);
+    toast(`💬 Nova mensagem!`, 1800);
   }
 
-  // Scroll sempre para o fim
-  requestAnimationFrame(() => {
+  if (state.chatOpen) {
     container.scrollTop = container.scrollHeight;
-  });
+  }
 }
 
 function addSystemMsg(text) {
@@ -1112,19 +1069,10 @@ window.restartGame = function() {
 };
 
 window.leaveRoom = function() {
-  // Stop all listeners first so we don't react to our own "left" write
   state.listeners.forEach(f=>f());
   state.listeners = [];
   state.chatInitialized = false;
-  state.seenChatKeys = new Set();
-  state.placeholderRemoved = false;
-  // Write a disconnect flag so the other player sees it, then delete after 3s
-  if (state.roomId && state.mode==='online') {
-    const rid = state.roomId;
-    update(roomRef(rid), { playerLeft: state.playerName })
-      .then(() => setTimeout(() => remove(roomRef(rid)), 3000))
-      .catch(() => remove(roomRef(rid)));
-  }
+  if (state.roomId && state.mode==='online') remove(roomRef(state.roomId));
   state.roomId = null; state.board = null; state.mode='local';
   // Reset chat
   document.getElementById('chatMessages').innerHTML = '<div class="chat-msg system"><div class="msg-bubble">Chat habilitado — mande um salve! 👋</div></div>';
