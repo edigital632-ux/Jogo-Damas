@@ -557,7 +557,7 @@
 
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-import { getDatabase, ref, set, get, onValue, update, remove, off, push, query, orderByChild, limitToLast }
+import { getDatabase, ref, set, get, onValue, update, remove, off, push, onChildAdded, query, orderByChild, limitToLast }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
 
 const firebaseConfig = {
@@ -703,6 +703,9 @@ window.joinRoom = async function() {
   document.getElementById('slot2Name').textContent = name;
   showScreen('lobbyScreen');
   listenRoom(code);
+  // Joiner: also start listening to chat immediately
+  // (listenRoom will call listenChat too on the lobby→game transition,
+  //  but the guard flag prevents double-init)
 };
 
 window.startLocal = function() {
@@ -729,8 +732,29 @@ window.startLocal = function() {
 function listenRoom(id) {
   const r = roomRef(id);
   const unsub = onValue(r, snap => {
-    if (!snap.exists()) { leaveRoom(); return; }
+    // Sala deletada = adversário saiu
+    if (!snap.exists()) {
+      // Só avisa se já estava jogando (não na tela inicial)
+      if (!document.getElementById('homeScreen').classList.contains('active')) {
+        toast('❌ O adversário saiu da partida.', 3500);
+        addSystemMsg('❌ O adversário saiu da partida.');
+        // Pequeno delay para o jogador ler o aviso antes de ir ao menu
+        setTimeout(() => leaveRoom(), 2500);
+      }
+      return;
+    }
     const d = snap.val();
+
+    // Adversário sinalizou saída
+    if (d.playerLeft && d.playerLeft !== state.playerName) {
+      if (!document.getElementById('homeScreen').classList.contains('active')) {
+        toast(`❌ ${d.playerLeft} saiu da partida.`, 3500);
+        addSystemMsg(`❌ ${d.playerLeft} saiu da partida.`);
+        setTimeout(() => leaveRoom(), 2500);
+      }
+      return;
+    }
+
     // Lobby phase
     if (document.getElementById('lobbyScreen').classList.contains('active')) {
       document.getElementById('slot1Name').textContent = d.p1 || '...';
@@ -742,13 +766,13 @@ function listenRoom(id) {
         state.board = JSON.parse(d.board);
         state.currentTurn = d.currentTurn;
         state.gameOver = false;
-        // Re-enable chat input row
         document.getElementById('chatInputRow').style.display = '';
-        addSystemMsg(`${d.p1} e ${d.p2} entraram. Boa partida! 🎮`);
         showScreen('gameScreen');
         renderBoard();
         updateGameUI();
         listenChat(id);
+        // System msg via chat (aparece para ambos via Firebase)
+        push(chatRef(id), { sender:'', text:`${d.p1} e ${d.p2} entraram. Boa partida! 🎮`, ts: Date.now(), system: true });
       }
     } else {
       // Game phase
@@ -786,51 +810,58 @@ function listenChat(id) {
   if (state.chatInitialized) return;
   state.chatInitialized = true;
   const cRef = chatRef(id);
-  // Listen for new messages
-  onValue(cRef, snap => {
+  state.seenChatKeys = new Set();
+
+  // onValue on the whole chat node: fires whenever ANY child changes.
+  // We track seen keys so each message is only rendered once, ever.
+  const chatUnsub = onValue(cRef, snap => {
     if (!snap.exists()) return;
-    const msgs = [];
-    snap.forEach(c => msgs.push({key: c.key, ...c.val()}));
-    renderChatMessages(msgs);
+    snap.forEach(child => {
+      if (state.seenChatKeys.has(child.key)) return;
+      state.seenChatKeys.add(child.key);
+      appendChatMessage(child.val());
+    });
   });
-  state.listeners.push(() => off(cRef));
+
+  state.listeners.push(() => off(cRef, 'value', chatUnsub));
 }
 
-function renderChatMessages(msgs) {
+function appendChatMessage(m) {
   const container = document.getElementById('chatMessages');
-  // Keep system messages at top
-  const sysMsg = container.querySelector('.chat-msg.system');
-  container.innerHTML = '';
-  if (sysMsg) container.appendChild(sysMsg);
+  const isMe = m.sender === state.playerName;
 
-  // Remove first system msg if we have real msgs
-  if (msgs.length > 0 && sysMsg) sysMsg.remove();
-
-  let newUnread = 0;
-  msgs.forEach(m => {
-    const isMe = m.sender === state.playerName;
-    const div = document.createElement('div');
-    div.className = `chat-msg ${m.system ? 'system' : (isMe ? 'mine' : 'theirs')}`;
-    if (!m.system) {
-      const senderEl = document.createElement('div');
-      senderEl.className = 'msg-sender';
-      senderEl.textContent = m.sender;
-      div.appendChild(senderEl);
+  // Remove the placeholder system msg on first real message
+  if (!m.system) {
+    const placeholder = container.querySelector('.chat-msg.system');
+    if (placeholder && placeholder.querySelector('.msg-bubble')?.textContent.includes('salve')) {
+      placeholder.remove();
     }
-    const bubble = document.createElement('div');
-    bubble.className = 'msg-bubble';
-    bubble.textContent = m.text;
-    div.appendChild(bubble);
-    container.appendChild(div);
-    if (!isMe && !m.system && state.chatOpen === false) newUnread++;
-  });
+  }
 
-  if (newUnread > 0) {
-    state.unreadCount += newUnread;
+  const div = document.createElement('div');
+  div.className = `chat-msg ${m.system ? 'system' : (isMe ? 'mine' : 'theirs')}`;
+
+  if (!m.system) {
+    const senderEl = document.createElement('div');
+    senderEl.className = 'msg-sender';
+    senderEl.textContent = m.sender;
+    div.appendChild(senderEl);
+  }
+
+  const bubble = document.createElement('div');
+  bubble.className = 'msg-bubble';
+  bubble.textContent = m.text;
+  div.appendChild(bubble);
+  container.appendChild(div);
+
+  // Show unread badge + toast when chat is collapsed and msg is from other person
+  if (!isMe && !m.system && !state.chatOpen) {
+    state.unreadCount++;
     const badge = document.getElementById('chatUnread');
     badge.textContent = state.unreadCount;
     badge.classList.add('show');
-    toast(`💬 Nova mensagem!`, 1800);
+    const preview = m.text.length > 30 ? m.text.slice(0,30)+'…' : m.text;
+    toast(`💬 ${m.sender}: ${preview}`, 2200);
   }
 
   if (state.chatOpen) {
@@ -1069,10 +1100,18 @@ window.restartGame = function() {
 };
 
 window.leaveRoom = function() {
+  // Stop all listeners first so we don't react to our own "left" write
   state.listeners.forEach(f=>f());
   state.listeners = [];
   state.chatInitialized = false;
-  if (state.roomId && state.mode==='online') remove(roomRef(state.roomId));
+  state.seenChatKeys = new Set();
+  // Write a disconnect flag so the other player sees it, then delete after 3s
+  if (state.roomId && state.mode==='online') {
+    const rid = state.roomId;
+    update(roomRef(rid), { playerLeft: state.playerName })
+      .then(() => setTimeout(() => remove(roomRef(rid)), 3000))
+      .catch(() => remove(roomRef(rid)));
+  }
   state.roomId = null; state.board = null; state.mode='local';
   // Reset chat
   document.getElementById('chatMessages').innerHTML = '<div class="chat-msg system"><div class="msg-bubble">Chat habilitado — mande um salve! 👋</div></div>';
