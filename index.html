@@ -299,6 +299,73 @@
   .spinner { width: 24px; height: 24px; border: 2px solid var(--border); border-top-color: var(--gold); border-radius: 50%; animation: spin 0.8s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
 
+  /* ── AI HINT ── */
+  .btn-ai {
+    background: linear-gradient(135deg, #7c3aed, #a855f7);
+    color: white;
+    border: 1px solid rgba(168,85,247,0.4);
+    box-shadow: 0 0 20px rgba(124,58,237,0.3);
+    position: relative;
+  }
+  .btn-ai:hover::after { opacity: 0.1; }
+  .btn-ai:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+  .btn-ai .ai-icon { margin-right: 0.3rem; }
+
+  .hint-panel {
+    width: 100%;
+    background: linear-gradient(135deg, rgba(124,58,237,0.12), rgba(168,85,247,0.08));
+    border: 1px solid rgba(168,85,247,0.35);
+    border-radius: 12px;
+    padding: 1rem 1.1rem;
+    display: none;
+    flex-direction: column;
+    gap: 0.55rem;
+    margin-top: 0.4rem;
+    animation: hintFadeIn 0.3s ease;
+  }
+  .hint-panel.visible { display: flex; }
+  @keyframes hintFadeIn { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:translateY(0); } }
+
+  .hint-header {
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .hint-label {
+    font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.1em;
+    color: #a855f7; font-weight: 600; display: flex; align-items: center; gap: 0.35rem;
+  }
+  .hint-close {
+    background: none; border: none; color: rgba(168,85,247,0.6); font-size: 1rem;
+    cursor: pointer; padding: 0 0.2rem; line-height: 1;
+  }
+  .hint-close:hover { color: #a855f7; }
+
+  .hint-text {
+    font-size: 0.88rem; color: var(--text); line-height: 1.55;
+  }
+  .hint-thinking {
+    display: flex; align-items: center; gap: 0.5rem;
+    font-size: 0.82rem; color: rgba(168,85,247,0.7);
+  }
+  .hint-spinner {
+    width: 16px; height: 16px;
+    border: 2px solid rgba(168,85,247,0.2);
+    border-top-color: #a855f7;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    flex-shrink: 0;
+  }
+  .hint-move-highlight {
+    display: inline-block;
+    background: rgba(168,85,247,0.2);
+    border: 1px solid rgba(168,85,247,0.4);
+    border-radius: 5px;
+    padding: 0.05rem 0.45rem;
+    font-family: 'Bebas Neue', sans-serif;
+    font-size: 1rem;
+    color: #c084fc;
+    letter-spacing: 0.05em;
+  }
+
   @media (max-width: 400px) {
     .player-info .name { max-width: 70px; font-size: 0.7rem; }
     .player-info .pieces-count { font-size: 1.3rem; }
@@ -399,7 +466,17 @@
   <div class="status-bar" id="statusBar">Carregando...</div>
   <div class="game-actions">
     <button class="btn btn-secondary btn-sm" onclick="leaveRoom()" style="flex:1;">← Sair</button>
+    <button class="btn btn-ai btn-sm" id="hintBtn" onclick="requestHint()" style="flex:1.4;"><span class="ai-icon">✦</span> Pedir Dica</button>
     <button class="btn btn-secondary btn-sm" onclick="offerDraw()" style="flex:1;">= Empate</button>
+  </div>
+  <div class="hint-panel" id="hintPanel">
+    <div class="hint-header">
+      <div class="hint-label">✦ Assistente IA</div>
+      <button class="hint-close" onclick="closeHint()">✕</button>
+    </div>
+    <div id="hintContent">
+      <div class="hint-thinking"><div class="hint-spinner"></div> Analisando o tabuleiro...</div>
+    </div>
   </div>
 </div>
 
@@ -822,6 +899,93 @@ function updateConnStatus(ok) {
   el.textContent=ok?'● Conectado':'● Desconectado';
   el.className='badge '+(ok?'online':'');
 }
+
+// ─── AI Hint ─────────────────────────────────────────────
+window.closeHint = function() {
+  document.getElementById('hintPanel').classList.remove('visible');
+};
+
+window.requestHint = async function() {
+  if (state.gameOver) { showToast('O jogo já terminou!'); return; }
+  const { board, currentTurn, myPlayer, mode } = state;
+  const isMyTurn = mode === 'local' || myPlayer === currentTurn;
+  if (!isMyTurn) { showToast('Aguarde sua vez para pedir uma dica'); return; }
+
+  const panel = document.getElementById('hintPanel');
+  const content = document.getElementById('hintContent');
+  const btn = document.getElementById('hintBtn');
+
+  panel.classList.add('visible');
+  content.innerHTML = `<div class="hint-thinking"><div class="hint-spinner"></div> Analisando o tabuleiro...</div>`;
+  btn.disabled = true;
+
+  // Build a text representation of the board
+  const colLetters = ['A','B','C','D','E','F','G','H'];
+  let boardText = '  A B C D E F G H\n';
+  for (let r = 0; r < 8; r++) {
+    boardText += `${8 - r} `;
+    for (let c = 0; c < 8; c++) {
+      const p = board[r][c];
+      if (!p) boardText += (r + c) % 2 === 0 ? '. ' : '_ ';
+      else if (p.player === 1) boardText += p.king ? 'O ' : 'o ';
+      else boardText += p.king ? 'X ' : 'x ';
+    }
+    boardText += `${8 - r}\n`;
+  }
+  boardText += '  A B C D E F G H';
+
+  const playerColor = currentTurn === 1 ? 'Laranja (peças marcadas como "o"/"O")' : 'Vermelho (peças marcadas como "x"/"X")';
+  const prompt = `Você é um assistente especialista em jogo de damas brasileiro. Analise o tabuleiro abaixo e sugira a melhor jogada para o jogador atual.
+
+LEGENDA:
+- "o" = peça normal do jogador Laranja (move para cima/linha menor)
+- "O" = dama do jogador Laranja
+- "x" = peça normal do jogador Vermelho (move para baixo/linha maior)  
+- "X" = dama do jogador Vermelho
+- "_" = casa escura vazia (casas jogáveis)
+- "." = casa clara (não jogável)
+
+TABULEIRO ATUAL:
+${boardText}
+
+JOGADOR DA VEZ: ${playerColor}
+
+Regras do jogo de damas brasileiro:
+- Peças normais movem-se apenas diagonalmente para frente
+- Damas movem-se diagonalmente em todas as direções
+- Capturas são obrigatórias
+- Capturas múltiplas são obrigatórias quando disponíveis
+- Peça vira dama ao chegar na última fileira
+
+Forneça:
+1. A jogada recomendada (ex: "mova de C6 para D5")
+2. Uma breve explicação tática (máximo 2 frases) do porquê é a melhor jogada
+3. Se houver capturas disponíveis, mencione isso
+
+Responda em português, de forma direta e amigável. Seja conciso (máximo 4 linhas).`;
+
+  try {
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 300,
+        messages: [{ role: "user", content: prompt }]
+      })
+    });
+    const data = await response.json();
+    const text = data.content?.[0]?.text || 'Não foi possível gerar uma dica agora.';
+
+    // Format the response: highlight move coordinates
+    const formatted = text.replace(/\b([A-H][1-8])\b/g, '<span class="hint-move-highlight">$1</span>');
+    content.innerHTML = `<div class="hint-text">${formatted}</div>`;
+  } catch (e) {
+    content.innerHTML = `<div class="hint-text" style="color:var(--red)">Erro ao conectar com a IA. Verifique sua conexão.</div>`;
+  } finally {
+    btn.disabled = false;
+  }
+};
 
 // ─── Init ─────────────────────────────────────────────────
 updateConnStatus(true);
