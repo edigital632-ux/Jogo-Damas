@@ -524,7 +524,7 @@
       <button class="chat-toggle-btn" id="chatToggleIcon">▼ recolher</button>
     </div>
     <div class="chat-messages" id="chatMessages">
-      <div class="chat-msg system">
+      <div class="chat-msg system" data-placeholder>
         <div class="msg-bubble">Chat habilitado — mande um salve! 👋</div>
       </div>
     </div>
@@ -578,7 +578,7 @@ let state = {
   board: null, currentTurn: 1, selectedPiece: null, validMoves: [],
   gameOver: false, mode: 'local', myPlayer: 1, roomId: null,
   playerName: '', listeners: [], chatOpen: true, unreadCount: 0,
-  chatInitialized: false
+  chatInitialized: false, placeholderRemoved: false, seenChatKeys: new Set()
 };
 
 function makeRoomId() {
@@ -809,33 +809,36 @@ function listenRoom(id) {
 function listenChat(id) {
   if (state.chatInitialized) return;
   state.chatInitialized = true;
-  const cRef = chatRef(id);
   state.seenChatKeys = new Set();
 
-  // onValue on the whole chat node: fires whenever ANY child changes.
-  // We track seen keys so each message is only rendered once, ever.
-  const chatUnsub = onValue(cRef, snap => {
-    if (!snap.exists()) return;
-    snap.forEach(child => {
-      if (state.seenChatKeys.has(child.key)) return;
-      state.seenChatKeys.add(child.key);
-      appendChatMessage(child.val());
-    });
-  });
+  const cRef = chatRef(id);
 
-  state.listeners.push(() => off(cRef, 'value', chatUnsub));
+  // onChildAdded: dispara para cada mensagem existente ao conectar,
+  // depois uma vez por nova mensagem — nunca perde nenhuma.
+  // seenChatKeys garante que nunca renderiza a mesma mensagem duas vezes.
+  function handleChild(snap) {
+    const key = snap.key;
+    if (state.seenChatKeys.has(key)) return;
+    state.seenChatKeys.add(key);
+    appendChatMessage(snap.val());
+  }
+
+  onChildAdded(cRef, handleChild);
+  // Guarda a referência correta para remover o listener depois
+  state.listeners.push(() => off(cRef, 'child_added', handleChild));
 }
 
 function appendChatMessage(m) {
   const container = document.getElementById('chatMessages');
-  const isMe = m.sender === state.playerName;
+  if (!container) return;
 
-  // Remove the placeholder system msg on first real message
-  if (!m.system) {
-    const placeholder = container.querySelector('.chat-msg.system');
-    if (placeholder && placeholder.querySelector('.msg-bubble')?.textContent.includes('salve')) {
-      placeholder.remove();
-    }
+  const isMe = !m.system && (m.sender === state.playerName);
+
+  // Remove placeholder "salve" apenas uma vez, só quando chega msg de verdade
+  if (!m.system && !state.placeholderRemoved) {
+    state.placeholderRemoved = true;
+    const placeholder = container.querySelector('[data-placeholder]');
+    if (placeholder) placeholder.remove();
   }
 
   const div = document.createElement('div');
@@ -854,7 +857,7 @@ function appendChatMessage(m) {
   div.appendChild(bubble);
   container.appendChild(div);
 
-  // Show unread badge + toast when chat is collapsed and msg is from other person
+  // Badge + toast para mensagem do adversário com chat recolhido
   if (!isMe && !m.system && !state.chatOpen) {
     state.unreadCount++;
     const badge = document.getElementById('chatUnread');
@@ -864,9 +867,10 @@ function appendChatMessage(m) {
     toast(`💬 ${m.sender}: ${preview}`, 2200);
   }
 
-  if (state.chatOpen) {
+  // Scroll sempre para o fim
+  requestAnimationFrame(() => {
     container.scrollTop = container.scrollHeight;
-  }
+  });
 }
 
 function addSystemMsg(text) {
@@ -1105,6 +1109,7 @@ window.leaveRoom = function() {
   state.listeners = [];
   state.chatInitialized = false;
   state.seenChatKeys = new Set();
+  state.placeholderRemoved = false;
   // Write a disconnect flag so the other player sees it, then delete after 3s
   if (state.roomId && state.mode==='online') {
     const rid = state.roomId;
