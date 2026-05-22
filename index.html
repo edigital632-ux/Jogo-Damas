@@ -701,11 +701,19 @@ window.joinRoom = async function() {
   document.getElementById('lobbyCode').textContent = code;
   document.getElementById('slot1Name').textContent = data.p1;
   document.getElementById('slot2Name').textContent = name;
-  showScreen('lobbyScreen');
+
+  // Vai direto pro game — p2 entra e o jogo começa imediatamente
+  document.getElementById('p1Name').textContent = data.p1;
+  document.getElementById('p2Name').textContent = name;
+  state.board = JSON.parse(data.board);
+  state.currentTurn = data.currentTurn || 1;
+  state.gameOver = false;
+  document.getElementById('chatInputRow').style.display = '';
+  showScreen('gameScreen');
+  renderBoard();
+  updateGameUI();
   listenRoom(code);
-  // Joiner: also start listening to chat immediately
-  // (listenRoom will call listenChat too on the lobby→game transition,
-  //  but the guard flag prevents double-init)
+  listenChat(code);  // <— garante que p2 escuta o chat
 };
 
 window.startLocal = function() {
